@@ -14,18 +14,29 @@ The order system is one Python (Flask) app that serves the UI and the order logi
 infra/network/        VPC, subnets, internet gateway, regional NAT gateway
 infra/security/       security groups, server IAM role (AWS managed policy only)
 infra/compute/        load balancer, launch template, Auto Scaling group, CPU scaling policy
+bootstrap/            GitHub connection, Git sync role and sync configs, budget, placeholder stack,
+                      deploy.sh (full build) and teardown.sh
 scripts/              cpu-spike.sh (SSM Run Command), watch.sh (shows which server answered)
 ```
 
-Each `infra/<layer>/` folder has a `template.yaml` and a Git sync `deployment.yaml` (parameters and stack tags). The stacks share values through exports: compute imports from network and security, and security imports from network.
+Each `infra/<layer>/` folder has a `template.yaml` and a Git sync `deployment.yaml` (parameters and stack tags). The stacks share values through exports: compute imports from network and security, and security imports from network. Git sync only watches `infra/`, so changes to `bootstrap/` never trigger a deploy.
 
-## Deploy
+## Deploy (and rebuild)
 
-All commands use `--profile onward-logistics --region eu-west-1`. The one-time bootstrap templates (GitHub connection, Git sync role and sync configs, placeholder stack) live outside this repository, in the shared `bootstrap/` folder.
+Everything uses the `onward-logistics` AWS profile in eu-west-1.
 
-1. **Connect GitHub (once).** Deploy `bootstrap/github-connection.yaml` as `onward-dev-github-connection`. Approve the pending connection in the console and install the AWS Connector for GitHub app on this repository, then update the stack with `CreateRepositoryLink=true`.
-2. **Reserve the stack names.** Git sync can only manage a stack that already exists, so create `onward-dev-orders-network`, `onward-dev-orders-security` and `onward-dev-orders-compute` from `bootstrap/placeholder-stack.yaml`.
-3. **Turn on Git sync, layer by layer.** Deploy `bootstrap/git-sync.yaml` as `onward-dev-orders-git-sync` (needs `CAPABILITY_NAMED_IAM`) with `SyncedLayers=1`. When the network stack finishes, update it to `2`, and when security finishes, to `3`.
+```bash
+BUDGET_EMAIL=you@example.com bootstrap/deploy.sh
+```
+
+`deploy.sh` builds in dependency order and is safe to re-run:
+
+1. **GitHub connection** (`onward-dev-github-connection`). On the very first run the script stops: approve the pending connection in the console (Developer Tools > Settings > Connections), install the AWS Connector for GitHub app on this repository, and run it again. This is the only console step, and it authorizes a connection CloudFormation created.
+2. **Budget alert** (`onward-dev-budget`): USD 150 a month, emails at 80% actual and 100% forecast. The email is passed at deploy time and never stored in Git.
+3. **Placeholder stacks** for `onward-dev-orders-network`, `-security` and `-compute`, because Git sync can only manage a stack that already exists.
+4. **Git sync** (`onward-dev-orders-git-sync`), one layer at a time: network, then security, then compute, waiting for each because the next one imports its exports.
+
+To rebuild from scratch, run `bootstrap/teardown.sh` (deletes compute, security, network and the Git sync stack, keeps the connection and budget) and then `bootstrap/deploy.sh`.
 
 After that, every change merged to `main` that touches a layer's template or deployment file redeploys that stack. Servers clone the app from [ghaby27/aws-dev-associate-lab-app](https://github.com/ghaby27/aws-dev-associate-lab-app) (`main`) when they launch.
 
@@ -38,8 +49,8 @@ After that, every change merged to `main` that touches a layer's template or dep
 | Failed server replaced | Terminate one instance. The site keeps answering from the other server, and the group launches a replacement. |
 | Losing an Availability Zone | Terminate every instance in one zone. The other zone keeps serving while replacements launch. |
 | Only the load balancer is public | Servers have no public IP and their security group only accepts port 8080 from the load balancer. Open a Session Manager shell and run `sudo dnf check-update` to show outbound updates still work. |
-| Rebuild from the repository | Delete the three stacks and repeat the deploy steps. |
+| Rebuild from the repository | `bootstrap/teardown.sh` then `bootstrap/deploy.sh`: about 15 minutes, no console steps. |
 
 ## Cleanup
 
-Delete `onward-dev-orders-compute`, then `-security`, then `-network`, then the Git sync and connection stacks. The NAT gateway and load balancer bill hourly, so delete the stacks once the lab is graded.
+Run `bootstrap/teardown.sh`, then delete `onward-dev-budget` and `onward-dev-github-connection`. The NAT gateway and load balancer bill hourly, so delete the stacks once the lab is graded.
