@@ -1,3 +1,4 @@
+# Deployed by CloudFormation Git sync to stack onward-dev-orders-security.
 template-file-path: infra/security/template.yaml
 
 parameters:
