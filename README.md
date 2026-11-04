@@ -14,7 +14,7 @@ The order system is one Python (Flask) app that serves the UI and the order logi
 infra/network/        VPC, subnets, internet gateway, regional NAT gateway
 infra/security/       security groups, server IAM role (AWS managed policy only)
 infra/compute/        load balancer, launch template, Auto Scaling group, CPU scaling policy
-bootstrap/            GitHub connection, Git sync role and sync configs, budget, placeholder stack,
+bootstrap/            GitHub connection, Git sync role and sync configs, settings (SSM), budget, placeholder stack,
                       deploy.sh (full build) and teardown.sh
 scripts/              cpu-spike.sh (SSM Run Command), watch.sh (shows which server answered)
 ```
@@ -26,17 +26,18 @@ Each `infra/<layer>/` folder has a `template.yaml` and a Git sync `deployment.ya
 Everything uses the `onward-logistics` AWS profile in eu-west-1.
 
 ```bash
-BUDGET_EMAIL=you@example.com bootstrap/deploy.sh
+bootstrap/deploy.sh                                  # later runs
+BUDGET_EMAIL=you@example.com bootstrap/deploy.sh     # first run only
 ```
 
 `deploy.sh` builds in dependency order and is safe to re-run:
 
 1. **GitHub connection** (`onward-dev-github-connection`). On the very first run the script stops: approve the pending connection in the console (Developer Tools > Settings > Connections), install the AWS Connector for GitHub app on this repository, and run it again. This is the only console step, and it authorizes a connection CloudFormation created.
-2. **Budget alert** (`onward-dev-budget`): USD 150 a month, emails at 80% actual and 100% forecast. The email is passed at deploy time and never stored in Git.
+2. **Budget alert** (`onward-dev-budget`): USD 150 a month, emails at 80% actual and 100% forecast. The alert address is stored once in SSM Parameter Store (`/onward/dev/budget-alert-email`, created by `onward-dev-settings`) and read by the budget through a dynamic reference, so it never appears in Git.
 3. **Placeholder stacks** for `onward-dev-orders-network`, `-security` and `-compute`, because Git sync can only manage a stack that already exists.
 4. **Git sync** (`onward-dev-orders-git-sync`), one layer at a time: network, then security, then compute, waiting for each because the next one imports its exports.
 
-To rebuild from scratch, run `bootstrap/teardown.sh` (deletes compute, security, network and the Git sync stack, keeps the connection and budget) and then `bootstrap/deploy.sh`.
+To rebuild from scratch, run `bootstrap/teardown.sh` (deletes compute, security, network and the Git sync stack, keeps the connection, settings and budget) and then `bootstrap/deploy.sh`.
 
 After that, every change merged to `main` that touches a layer's template or deployment file redeploys that stack. Servers clone the app from [ghaby27/aws-dev-associate-lab-app](https://github.com/ghaby27/aws-dev-associate-lab-app) (`main`) when they launch.
 
@@ -53,4 +54,4 @@ After that, every change merged to `main` that touches a layer's template or dep
 
 ## Cleanup
 
-Run `bootstrap/teardown.sh`, then delete `onward-dev-budget` and `onward-dev-github-connection`. The NAT gateway and load balancer bill hourly, so delete the stacks once the lab is graded.
+Run `bootstrap/teardown.sh`, then delete `onward-dev-budget`, `onward-dev-settings` and `onward-dev-github-connection`. The NAT gateway and load balancer bill hourly, so delete the stacks once the lab is graded.
