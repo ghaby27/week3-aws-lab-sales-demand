@@ -1,0 +1,93 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Week 3 security layer for the Onward Logistics order system: the load balancer
+  and server security groups, and the server role. Only the load balancer accepts
+  traffic from the internet; servers accept only the load balancer, and no admin
+  port is open anywhere (administration is through Session Manager).
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+  AppPort:
+    Type: Number
+    Default: 8080
+
+Resources:
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "onward-${Environment}-orders-alb-sg"
+      GroupDescription: Internet-facing load balancer - HTTP from anywhere
+      VpcId: !ImportValue { "Fn::Sub": "onward-${Environment}-orders-vpc-id" }
+      SecurityGroupIngress:
+        - Description: HTTP from merchants and customers
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - { Key: Name, Value: !Sub "onward-${Environment}-orders-alb-sg" }
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "onward-${Environment}-orders-app-sg"
+      GroupDescription: Order servers - app port from the load balancer only, no admin ports
+      VpcId: !ImportValue { "Fn::Sub": "onward-${Environment}-orders-vpc-id" }
+      SecurityGroupIngress:
+        - Description: Order app from the load balancer
+          IpProtocol: tcp
+          FromPort: !Ref AppPort
+          ToPort: !Ref AppPort
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      # Default egress (all outbound) stays: servers reach updates, packages and
+      # Systems Manager through the NAT gateway. Nothing can connect in.
+      Tags:
+        - { Key: Name, Value: !Sub "onward-${Environment}-orders-app-sg" }
+
+  # The load balancer may only talk to the servers. A separate resource avoids a
+  # circular reference between the two groups.
+  AlbToAppEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref AlbSecurityGroup
+      Description: Forward requests to the order servers
+      IpProtocol: tcp
+      FromPort: !Ref AppPort
+      ToPort: !Ref AppPort
+      DestinationSecurityGroupId: !Ref AppSecurityGroup
+
+  # AWS managed policy only: lets the SSM agent register so engineers can use
+  # Session Manager and Run Command. No inline policies.
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "onward-${Environment}-orders-instance-role"
+      Description: Order servers - Systems Manager access for Session Manager and Run Command.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Sub "onward-${Environment}-orders-instance-profile"
+      Roles: [!Ref InstanceRole]
+
+Outputs:
+  AlbSecurityGroupId:
+    Value: !Ref AlbSecurityGroup
+    Export: { Name: !Sub "onward-${Environment}-orders-alb-sg-id" }
+  AppSecurityGroupId:
+    Value: !Ref AppSecurityGroup
+    Export: { Name: !Sub "onward-${Environment}-orders-app-sg-id" }
+  InstanceProfileArn:
+    Value: !GetAtt InstanceProfile.Arn
+    Export: { Name: !Sub "onward-${Environment}-orders-instance-profile-arn" }

@@ -1,0 +1,10 @@
+template-file-path: infra/network/template.yaml
+
+parameters:
+  Environment: dev
+
+# Stack tags propagate to every taggable resource in the stack.
+tags:
+  Project: onward
+  Owner: Gabriel Anyaele
+  Environment: dev

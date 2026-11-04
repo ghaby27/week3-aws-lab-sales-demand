@@ -1,0 +1,212 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Week 3 compute layer for the Onward Logistics order system: the internet-facing
+  Application Load Balancer (the single public entry point) and an Auto Scaling
+  group of private Amazon Linux servers across two AZs that installs the order
+  app at boot and scales between 2 and 4 servers on average CPU.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+  OwnerName:
+    Type: String
+    Description: Shown on the page and used as the Owner tag on servers and volumes.
+  LabName:
+    Type: String
+    Default: Handling Sales Day Demand for the Onward Logistics Order System
+  AppRepositoryUrl:
+    Type: String
+    Default: https://github.com/ghaby27/aws-dev-associate-lab-app.git
+    Description: Public Git repository each server clones its app from at boot.
+  AppBranch:
+    Type: String
+    Default: main
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    Description: Free Tier eligible. T3 default (unlimited) credits, so a busy server is not throttled before scaling reacts.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  MinSize:
+    Type: Number
+    Default: 2
+    Description: One server per AZ, so a zone loss leaves one serving.
+  MaxSize:
+    Type: Number
+    Default: 4
+  CpuTargetPercent:
+    Type: Number
+    Default: 50
+  AppPort:
+    Type: Number
+    Default: 8080
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # Load balancer: the only public resource
+  # ---------------------------------------------------------------------------
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "onward-${Environment}-orders-alb"
+      Type: application
+      Scheme: internet-facing
+      Subnets: !Split [",", !ImportValue { "Fn::Sub": "onward-${Environment}-orders-public-subnet-ids" }]
+      SecurityGroups:
+        - !ImportValue { "Fn::Sub": "onward-${Environment}-orders-alb-sg-id" }
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "onward-${Environment}-orders-tg"
+      VpcId: !ImportValue { "Fn::Sub": "onward-${Environment}-orders-vpc-id" }
+      TargetType: instance
+      Protocol: HTTP
+      Port: !Ref AppPort
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher: { HttpCode: "200" }
+      TargetGroupAttributes:
+        # Drain quickly so a removed or failed server leaves rotation in seconds.
+        - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # ---------------------------------------------------------------------------
+  # Launch template: no key pair, no public IP, IMDSv2 only, 1-minute metrics
+  # ---------------------------------------------------------------------------
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub "onward-${Environment}-orders-lt"
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile:
+          Arn: !ImportValue { "Fn::Sub": "onward-${Environment}-orders-instance-profile-arn" }
+        SecurityGroupIds:
+          - !ImportValue { "Fn::Sub": "onward-${Environment}-orders-app-sg-id" }
+        Monitoring:
+          Enabled: true
+        MetadataOptions:
+          HttpTokens: required
+          HttpEndpoint: enabled
+        BlockDeviceMappings:
+          - DeviceName: /dev/xvda
+            Ebs:
+              VolumeType: gp3
+              VolumeSize: 8
+              Encrypted: true
+              DeleteOnTermination: true
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - { Key: Name, Value: !Sub "onward-${Environment}-orders" }
+              - { Key: Project, Value: onward }
+              - { Key: Owner, Value: !Ref OwnerName }
+              - { Key: Environment, Value: !Ref Environment }
+          - ResourceType: volume
+            Tags:
+              - { Key: Name, Value: !Sub "onward-${Environment}-orders" }
+              - { Key: Project, Value: onward }
+              - { Key: Owner, Value: !Ref OwnerName }
+              - { Key: Environment, Value: !Ref Environment }
+        # Installs and starts the app at boot. cfn-signal tells CloudFormation the
+        # server is ready, so a stack create or update only succeeds when it is.
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            set -euo pipefail
+            exec > >(tee /var/log/onward-bootstrap.log) 2>&1
+            signal() {
+              /opt/aws/bin/cfn-signal -e "$1" --stack ${AWS::StackName} --resource AppAutoScalingGroup --region ${AWS::Region} || true
+            }
+            trap 'signal 1' ERR
+
+            dnf install -y git python3-pip aws-cfn-bootstrap
+
+            git clone --depth 1 --branch "${AppBranch}" "${AppRepositoryUrl}" /opt/onward/src
+            python3 -m venv /opt/onward/venv
+            /opt/onward/venv/bin/pip install --quiet -r /opt/onward/src/requirements.txt
+
+            useradd --system --no-create-home --shell /sbin/nologin onward
+            mkdir -p /etc/onward
+            cat > /etc/onward/orders.env <<'EOF'
+            OWNER_NAME=${OwnerName}
+            LAB_NAME=${LabName}
+            EOF
+            install -m 0644 /opt/onward/src/onward-orders.service /etc/systemd/system/onward-orders.service
+            systemctl daemon-reload
+            systemctl enable --now onward-orders
+
+            for i in $(seq 1 30); do
+              curl -sf http://localhost:${AppPort}/health && { signal 0; exit 0; }
+              sleep 2
+            done
+            signal 1
+
+  # ---------------------------------------------------------------------------
+  # Auto Scaling group: private subnets in both AZs, replaced on failed health
+  # checks, 2 to 4 servers
+  # ---------------------------------------------------------------------------
+  AppAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    CreationPolicy:
+      ResourceSignal:
+        Count: !Ref MinSize
+        Timeout: PT15M
+    UpdatePolicy:
+      AutoScalingRollingUpdate:
+        MinInstancesInService: 1
+        MaxBatchSize: 1
+        WaitOnResourceSignals: true
+        PauseTime: PT15M
+      AutoScalingScheduledAction:
+        IgnoreUnmodifiedGroupSizeProperties: true
+    Properties:
+      AutoScalingGroupName: !Sub "onward-${Environment}-orders-asg"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MinSize: !Ref MinSize
+      MaxSize: !Ref MaxSize
+      VPCZoneIdentifier: !Split [",", !ImportValue { "Fn::Sub": "onward-${Environment}-orders-private-subnet-ids" }]
+      TargetGroupARNs: [!Ref TargetGroup]
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 180
+      DefaultInstanceWarmup: 180
+      MetricsCollection:
+        - Granularity: 1Minute
+          Metrics: [GroupInServiceInstances, GroupDesiredCapacity]
+
+  # Keeps average CPU near the target: adds servers when it rises, removes them
+  # when it falls. CloudWatch alarms are created and managed by this policy.
+  CpuTargetTrackingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AutoScalingGroupName: !Ref AppAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: !Ref CpuTargetPercent
+
+Outputs:
+  AppUrl:
+    Description: The single public address of the order system.
+    Value: !Sub "http://${LoadBalancer.DNSName}"
+  AutoScalingGroupName:
+    Value: !Ref AppAutoScalingGroup
