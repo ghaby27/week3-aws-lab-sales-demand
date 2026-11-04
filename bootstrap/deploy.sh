@@ -22,6 +22,20 @@ deploy() { # stack template [params...]
 
 stack_status() { aws cloudformation describe-stacks --stack-name "$1" --query 'Stacks[0].StackStatus' --output text 2>/dev/null || echo MISSING; }
 
+# Pushes a timestamp to infra/<layer>/deployment.yaml so Git sync sees a file change and deploys it.
+trigger_sync() { # layer
+  local repo file
+  repo=$(git rev-parse --show-toplevel)
+  file="infra/$1/deployment.yaml"
+  git -C "$repo" pull -q --ff-only origin main
+  sed -i '/^# Last rebuilt:/d' "$repo/$file"
+  sed -i "1a # Last rebuilt: $(date -u +%FT%TZ) (bootstrap/deploy.sh trigger for Git sync)" "$repo/$file"
+  git -C "$repo" add "$file"
+  git -C "$repo" commit -q -m "chore: trigger git sync for $1"
+  git -C "$repo" push -q origin HEAD:main
+  echo "  pushed a rebuild trigger for $1 (Git sync had nothing new to deploy)"
+}
+
 echo "1. GitHub connection"
 if [ "$(stack_status onward-$ENV-github-connection)" = MISSING ]; then
   deploy onward-$ENV-github-connection github-connection.yaml CreateRepositoryLink=false
@@ -64,7 +78,20 @@ for n in 1 2 3; do
   if [ "${current:-0}" -ge "$n" ] 2>/dev/null; then
     echo "  $stack: already synced"; continue
   fi
+  enabled_at=$(date +%s)
   deploy onward-$ENV-orders-git-sync git-sync.yaml SyncedLayers=$n
+  # Git sync remembers the last commit it deployed to each stack name, even after the stack is
+  # deleted, so on a rebuild a new sync config deploys nothing until a push changes the layer's
+  # files. If no new sync starts within ~90s, push a timestamp to the layer's deployment file.
+  started=0
+  for _ in $(seq 1 9); do
+    sync_start=$(aws codestar-connections get-resource-sync-status --resource-name "$stack" \
+      --sync-type CFN_STACK_SYNC --query 'LatestSync.StartedAt' --output text 2>/dev/null || true)
+    if [ -n "$sync_start" ] && [ "$sync_start" != None ] && \
+       [ "$(date -d "$sync_start" +%s)" -ge "$enabled_at" ]; then started=1; break; fi
+    sleep 10
+  done
+  if [ $started = 0 ]; then trigger_sync "$l"; fi
   # Wait until Git sync has replaced the placeholder (real stacks have outputs; placeholders do not).
   for _ in $(seq 1 80); do
     st=$(stack_status "$stack")
