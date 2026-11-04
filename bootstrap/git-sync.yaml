@@ -1,0 +1,111 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Git sync wiring for the week 3 order system: the role Git sync deploys with,
+  and one sync configuration per stack (network, security, compute), each
+  keeping its stack in step with infra/<layer>/deployment.yaml on main.
+  The stacks depend on each other's exports, so on a first build enable them in
+  order with SyncedLayers = 1, then 2, then 3, waiting for each stack to finish.
+  Requires bootstrap/github-connection.yaml (pass 2) and a placeholder stack for
+  each layer (bootstrap/placeholder-stack.yaml).
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+  Branch:
+    Type: String
+    Default: main
+  SyncedLayers:
+    Type: Number
+    AllowedValues: [1, 2, 3]
+    Default: 3
+    Description: 1 = network, 2 = network + security, 3 = network + security + compute.
+
+Conditions:
+  SyncSecurity: !Not [!Equals [!Ref SyncedLayers, 1]]
+  SyncCompute: !Equals [!Ref SyncedLayers, 3]
+
+Resources:
+  # PowerUserAccess covers every service except IAM and Organizations. This
+  # customer managed policy (not inline) adds IAM, limited to resources named
+  # onward-<environment>-*, so the stacks can create their own role and nothing else.
+  GitSyncIamPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "onward-${Environment}-orders-git-sync-iam"
+      Description: IAM for the order system stacks, limited to onward-<environment>-* resources.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: OnwardIamResources
+            Effect: Allow
+            Action: iam:*
+            Resource:
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/onward-${Environment}-*"
+              - !Sub "arn:${AWS::Partition}:iam::${AWS::AccountId}:instance-profile/onward-${Environment}-*"
+          - Sid: ReadIam
+            Effect: Allow
+            Action: [iam:Get*, iam:List*]
+            Resource: "*"
+
+  GitSyncRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "onward-${Environment}-orders-git-sync"
+      Description: Assumed by CloudFormation Git sync to deploy the order system stacks.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudformation.sync.codeconnections.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/PowerUserAccess"
+        - !Ref GitSyncIamPolicy
+
+  # FILE_CHANGE: a stack only redeploys when its own template or deployment file changes.
+  NetworkSync:
+    Type: AWS::CodeStarConnections::SyncConfiguration
+    Properties:
+      ResourceName: !Sub "onward-${Environment}-orders-network"
+      SyncType: CFN_STACK_SYNC
+      RepositoryLinkId: !ImportValue { "Fn::Sub": "onward-${Environment}-orders-repository-link-id" }
+      Branch: !Ref Branch
+      ConfigFile: infra/network/deployment.yaml
+      RoleArn: !GetAtt GitSyncRole.Arn
+      PublishDeploymentStatus: ENABLED
+      TriggerResourceUpdateOn: FILE_CHANGE
+
+  SecuritySync:
+    Type: AWS::CodeStarConnections::SyncConfiguration
+    Condition: SyncSecurity
+    Properties:
+      ResourceName: !Sub "onward-${Environment}-orders-security"
+      SyncType: CFN_STACK_SYNC
+      RepositoryLinkId: !ImportValue { "Fn::Sub": "onward-${Environment}-orders-repository-link-id" }
+      Branch: !Ref Branch
+      ConfigFile: infra/security/deployment.yaml
+      RoleArn: !GetAtt GitSyncRole.Arn
+      PublishDeploymentStatus: ENABLED
+      TriggerResourceUpdateOn: FILE_CHANGE
+
+  ComputeSync:
+    Type: AWS::CodeStarConnections::SyncConfiguration
+    Condition: SyncCompute
+    Properties:
+      ResourceName: !Sub "onward-${Environment}-orders-compute"
+      SyncType: CFN_STACK_SYNC
+      RepositoryLinkId: !ImportValue { "Fn::Sub": "onward-${Environment}-orders-repository-link-id" }
+      Branch: !Ref Branch
+      ConfigFile: infra/compute/deployment.yaml
+      RoleArn: !GetAtt GitSyncRole.Arn
+      PublishDeploymentStatus: ENABLED
+      TriggerResourceUpdateOn: FILE_CHANGE
+
+Outputs:
+  GitSyncRoleArn:
+    Value: !GetAtt GitSyncRole.Arn

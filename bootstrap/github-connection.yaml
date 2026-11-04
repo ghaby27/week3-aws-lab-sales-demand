@@ -1,0 +1,56 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  One-time setup: the CodeConnections link between this AWS account and the
+  GitHub repository that holds this lab. Deploy in two passes, because AWS needs
+  a person to approve a GitHub connection before a repository can be linked:
+    1. Deploy with CreateRepositoryLink=false, then approve the pending connection
+       in the console (Developer Tools > Settings > Connections > Update pending
+       connection) and install the AWS Connector for GitHub app on the repository.
+    2. Update the stack with CreateRepositoryLink=true.
+
+Parameters:
+  Environment:
+    Type: String
+    AllowedValues: [dev, test, prod]
+    Default: dev
+  GitHubOwner:
+    Type: String
+    Default: ghaby27
+  RepositoryName:
+    Type: String
+    Default: week3-aws-lab-sales-demand
+  CreateRepositoryLink:
+    Type: String
+    AllowedValues: ["false", "true"]
+    Default: "false"
+    Description: Set to "true" only after the connection has been approved.
+
+Conditions:
+  LinkRepository: !Equals [!Ref CreateRepositoryLink, "true"]
+
+Resources:
+  GitHubConnection:
+    Type: AWS::CodeConnections::Connection
+    Properties:
+      ConnectionName: !Sub "onward-${Environment}-github"
+      ProviderType: GitHub
+
+  RepositoryLink:
+    Type: AWS::CodeStarConnections::RepositoryLink
+    Condition: LinkRepository
+    Properties:
+      ConnectionArn: !Ref GitHubConnection
+      OwnerId: !Ref GitHubOwner
+      RepositoryName: !Ref RepositoryName
+
+Outputs:
+  ConnectionArn:
+    Value: !Ref GitHubConnection
+  ConnectionStatus:
+    Description: Must be AVAILABLE before pass 2.
+    Value: !GetAtt GitHubConnection.ConnectionStatus
+  RepositoryLinkId:
+    Condition: LinkRepository
+    Value: !GetAtt RepositoryLink.RepositoryLinkId
+    Export:
+      Name: !Sub "onward-${Environment}-orders-repository-link-id"
