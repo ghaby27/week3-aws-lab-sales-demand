@@ -37,6 +37,8 @@ BUDGET_EMAIL=you@example.com bootstrap/deploy.sh     # first run only
 3. **Placeholder stacks** for `onward-dev-orders-network`, `-security` and `-compute`, because Git sync can only manage a stack that already exists.
 4. **Git sync** (`onward-dev-orders-git-sync`), one layer at a time: network, then security, then compute, waiting for each because the next one imports its exports.
 
+   Git sync remembers the last commit it deployed to each stack name, even after the stack is deleted, and only deploys when a push changes that stack's files. On a fresh account a new sync config deploys straight away. On a rebuild nothing has changed, so if no sync starts within about 90 seconds, `deploy.sh` stamps `# Last rebuilt: <time>` into that layer's `deployment.yaml`, commits `chore: trigger git sync for <layer>` and pushes it. Git sync still does every deployment. This needs push access to this repository.
+
 To rebuild from scratch, run `bootstrap/teardown.sh` (deletes compute, security, network and the Git sync stack, keeps the connection, settings and budget) and then `bootstrap/deploy.sh`.
 
 After that, every change merged to `main` that touches a layer's template or deployment file redeploys that stack. Servers clone the app from [ghaby27/aws-dev-associate-lab-app](https://github.com/ghaby27/aws-dev-associate-lab-app) (`main`) when they launch.
@@ -50,7 +52,7 @@ After that, every change merged to `main` that touches a layer's template or dep
 | Failed server replaced | Terminate one instance. The site keeps answering from the other server, and the group launches a replacement. |
 | Losing an Availability Zone | Terminate every instance in one zone. The other zone keeps serving while replacements launch. |
 | Only the load balancer is public | Servers have no public IP and their security group only accepts port 8080 from the load balancer. Open a Session Manager shell and run `sudo dnf check-update` to show outbound updates still work. |
-| Rebuild from the repository | `bootstrap/teardown.sh` then `bootstrap/deploy.sh`: about 15 minutes, no console steps. |
+| Rebuild from the repository | `bootstrap/teardown.sh` then `bootstrap/deploy.sh`: about 20 minutes, no console steps. `deploy.sh` pushes one trigger commit per layer so Git sync redeploys them. |
 
 ## Cleanup
 
