@@ -1,3 +1,4 @@
+# Deployed by CloudFormation Git sync to stack onward-dev-orders-compute.
 template-file-path: infra/compute/template.yaml
 
 parameters:
