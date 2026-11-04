@@ -3,7 +3,7 @@
 #   GitHub connection -> budget -> placeholder stacks -> Git sync (network, then security, then compute)
 # Git sync then deploys infra/<layer>/ from the deployment repo, and servers clone the app repo at boot.
 #
-# Usage: BUDGET_EMAIL=you@example.com bootstrap/deploy.sh
+# Usage: bootstrap/deploy.sh   (first run: BUDGET_EMAIL=you@example.com bootstrap/deploy.sh)
 # First run only: the GitHub connection must be approved once in the console; the script stops and says when.
 set -euo pipefail
 export AWS_PROFILE=${AWS_PROFILE:-onward-logistics} AWS_REGION=${AWS_REGION:-eu-west-1}
@@ -36,10 +36,14 @@ fi
 deploy onward-$ENV-github-connection github-connection.yaml CreateRepositoryLink=true
 
 echo "2. Budget alert"
+# The alert email lives in SSM (settings stack), never in Git. Pass BUDGET_EMAIL only to set or change it.
 if [ -n "${BUDGET_EMAIL:-}" ]; then
-  deploy onward-$ENV-budget budget.yaml AlertEmail="$BUDGET_EMAIL"
+  deploy onward-$ENV-settings settings.yaml BudgetAlertEmail="$BUDGET_EMAIL"
+fi
+if [ "$(stack_status onward-$ENV-settings)" = MISSING ]; then
+  echo "  skipped: run once with BUDGET_EMAIL=you@example.com to store the alert address"
 else
-  echo "  skipped (set BUDGET_EMAIL to create or update it)"
+  deploy onward-$ENV-budget budget.yaml
 fi
 
 echo "3. Placeholder stacks"
