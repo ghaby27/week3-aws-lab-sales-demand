@@ -75,20 +75,27 @@ current=$(aws cloudformation describe-stacks --stack-name onward-$ENV-orders-git
   --query "Stacks[0].Parameters[?ParameterKey=='SyncedLayers'].ParameterValue" --output text 2>/dev/null || echo 0)
 for n in 1 2 3; do
   l=${LAYERS[$((n - 1))]}; stack=onward-$ENV-orders-$l
-  if [ "${current:-0}" -ge "$n" ] 2>/dev/null; then
+  # Real stacks have outputs; placeholders do not.
+  if [ "$(aws cloudformation describe-stacks --stack-name "$stack" --query 'length(Stacks[0].Outputs || `[]`)' --output text)" -gt 0 ]; then
     echo "  $stack: already synced"; continue
   fi
   enabled_at=$(date +%s)
-  deploy onward-$ENV-orders-git-sync git-sync.yaml SyncedLayers=$n
+  if ! [ "${current:-0}" -ge "$n" ] 2>/dev/null; then
+    deploy onward-$ENV-orders-git-sync git-sync.yaml SyncedLayers=$n
+  fi
   # Git sync remembers the last commit it deployed to each stack name, even after the stack is
   # deleted, so on a rebuild a new sync config deploys nothing until a push changes the layer's
-  # files. If no new sync starts within ~90s, push a timestamp to the layer's deployment file.
+  # files. If no real sync starts within ~90s (none, or only "Nothing to sync"), push a timestamp
+  # to the layer's deployment file.
   started=0
   for _ in $(seq 1 9); do
-    sync_start=$(aws codestar-connections get-resource-sync-status --resource-name "$stack" \
-      --sync-type CFN_STACK_SYNC --query 'LatestSync.StartedAt' --output text 2>/dev/null || true)
-    if [ -n "$sync_start" ] && [ "$sync_start" != None ] && \
-       [ "$(date -d "$sync_start" +%s)" -ge "$enabled_at" ]; then started=1; break; fi
+    read -r sync_start sync_msg < <(aws codestar-connections get-resource-sync-status --resource-name "$stack" \
+      --sync-type CFN_STACK_SYNC --query '[LatestSync.StartedAt, join(`|`, LatestSync.Events[].Event)]' \
+      --output text 2>/dev/null || true)
+    if [ -n "${sync_start:-}" ] && [ "$sync_start" != None ] && \
+       [ "$(date -d "$sync_start" +%s)" -ge "$enabled_at" ]; then
+      case "${sync_msg:-}" in *"Nothing to sync"*) break ;; *) started=1; break ;; esac
+    fi
     sleep 10
   done
   if [ $started = 0 ]; then trigger_sync "$l"; fi
