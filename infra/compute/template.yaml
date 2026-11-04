@@ -67,13 +67,19 @@ Resources:
       Protocol: HTTP
       Port: !Ref AppPort
       HealthCheckPath: /health
-      HealthCheckIntervalSeconds: 10
+      # Fastest detection the ALB allows: a dead server is out after two missed 5 s checks.
+      HealthCheckIntervalSeconds: 5
+      HealthCheckTimeoutSeconds: 3
       HealthyThresholdCount: 2
       UnhealthyThresholdCount: 2
       Matcher: { HttpCode: "200" }
       TargetGroupAttributes:
         # Drain quickly so a removed or failed server leaves rotation in seconds.
         - { Key: deregistration_delay.timeout_seconds, Value: "30" }
+        # Automatic target weights: shift traffic away from a server as soon as it starts
+        # failing requests, before the health checks have marked it unhealthy.
+        - { Key: load_balancing.algorithm.type, Value: weighted_random }
+        - { Key: load_balancing.algorithm.anomaly_mitigation, Value: "on" }
 
   Listener:
     Type: AWS::ElasticLoadBalancingV2::Listener
