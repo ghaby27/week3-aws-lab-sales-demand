@@ -1,5 +1,5 @@
 # Deployed by CloudFormation Git sync to stack onward-dev-orders-security.
-# Last rebuilt: 2026-11-04T21:06:00Z (bootstrap/deploy.sh trigger for Git sync)
+# Last rebuilt: 2026-11-05T11:11:29Z (bootstrap/deploy.sh trigger for Git sync)
 template-file-path: infra/security/template.yaml
 
 parameters:
