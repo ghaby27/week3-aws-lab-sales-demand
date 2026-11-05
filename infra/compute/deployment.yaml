@@ -1,5 +1,5 @@
 # Deployed by CloudFormation Git sync to stack onward-dev-orders-compute.
-# Last rebuilt: 2026-11-04T21:10:17Z (bootstrap/deploy.sh trigger for Git sync)
+# Last rebuilt: 2026-11-05T11:15:32Z (bootstrap/deploy.sh trigger for Git sync)
 template-file-path: infra/compute/template.yaml
 
 parameters:
